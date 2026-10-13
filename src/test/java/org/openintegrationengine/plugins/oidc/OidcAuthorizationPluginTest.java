@@ -35,8 +35,9 @@ import com.nimbusds.jwt.JWTClaimsSet;
 /**
  * The façade contract: null ONLY for unprefixed passwords of accounts the
  * provider does not own (local fall-through keeps engine lockout and
- * break-glass), FAIL — never null — for anything {@code oidc:}-prefixed, only
- * a ticket is a credential, and the kill switch wins over any configuration.
+ * break-glass), FAIL — never null — for anything {@code oidc:}-prefixed. A
+ * ticket and an {@code oidc:jwt:} token are the credentials, and the kill
+ * switch wins over any configuration.
  */
 class OidcAuthorizationPluginTest {
 
@@ -278,7 +279,7 @@ class OidcAuthorizationPluginTest {
         assertNull(OidcAuthorizationPlugin.currentError());
     }
 
-    /* ---- only a ticket is a credential --------------------------------- */
+    /* ---- ticket and jwt are the credentials ---------------------------- */
 
     /**
      * A plugin whose validator ACCEPTS, so execution reaches the replay cache
@@ -322,6 +323,27 @@ class OidcAuthorizationPluginTest {
         assertEquals(Status.FAIL, status.getStatus());
         assertEquals("SSO sign-in was rejected.", status.getMessage());
         verify(validator, never()).validate(any());
+    }
+
+    /**
+     * {@code oidc:jwt:} is a token the configured provider minted. The same
+     * validator that checks an ID token accepts it, the account path runs, and
+     * the returned username is the session. A second presentation is a replay.
+     */
+    @Test
+    void aProviderTokenPresentedAsJwtStartsASessionAndCannotBeReplayed() throws Exception {
+        OidcTokenValidator validator = mock(OidcTokenValidator.class);
+        when(validator.validate("token-aaa")).thenReturn(validClaims());
+        OidcAuthorizationPlugin plugin = new OidcAuthorizationPlugin();
+        plugin.configure(OidcConfig.from(policy()), validator, directory(true));
+
+        LoginStatus status = plugin.authorizeUser("ignored", "oidc:jwt:token-aaa");
+        assertEquals(Status.SUCCESS, status.getStatus());
+        assertEquals("jdoe", status.getUpdatedUsername());
+        verify(validator, times(1)).validate("token-aaa");
+
+        assertEquals("SSO assertion was already used.", plugin.authorizeUser("ignored", "oidc:jwt:token-aaa").getMessage());
+        verify(validator, times(2)).validate("token-aaa");
     }
 
     @Test

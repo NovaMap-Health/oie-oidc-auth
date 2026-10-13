@@ -103,7 +103,7 @@ The engine exposes three operations that need no session: `GET /api/extensions/o
 
 Rules that apply to this flow:
 
-- Only a ticket is a sign-in credential. The engine refuses an ID token sent to `/users/_login` directly.
+- A browser sign-in uses a ticket. A token the configured provider minted can also be presented as `password=oidc:jwt:<jwt>`. The engine validates that token the same way as an ID token — discovery issuer, client-id audience, JWKS, lifetime — and then opens the session. It does not check a nonce. An ID token sent without the `jwt:` prefix is refused unread.
 - The return route must be a path on the web administrator of at most 2048 characters. Any other value returns the user to `/`.
 - The code exchange uses `client_secret_basic`. It uses `client_secret_post` only when the provider's discovery document lists `client_secret_post` and not `client_secret_basic`.
 - The engine limits `/callback` to sixty requests per minute per client and six hundred per minute in total. The client is the first `X-Forwarded-For` address when the header is present, and the peer address otherwise. `/public` and `/start` have no limit.
