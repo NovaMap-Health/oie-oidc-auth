@@ -38,15 +38,17 @@ import com.nimbusds.jwt.JWTClaimsSet;
  * JIT-provisions when configured, syncs the RBAC role, and answers with the
  * derived username so the session — and every audited event — belongs to the
  * real named user.
- * A JWT authorization grant (RFC 7523) the same provider minted may also be
- * presented directly as {@code password=oidc:jwt:<jwt>}, but only when
- * {@code jwt.enabled} is true. It is checked for the discovery issuer and
- * JWKS like an ID token, but its audience must be {@code jwt.audience}, this
+ * A JWT access token (RFC 9068) the same provider issued for this engine may
+ * also be presented directly as {@code password=oidc:jwt:<jwt>}, but only
+ * when {@code jwt.enabled} is true. The engine then acts as the token's
+ * resource server: the token is checked for the discovery issuer and JWKS
+ * like an ID token, but its audience must be {@code jwt.audience}, this
  * engine alone and never the client id, it must carry a {@code jti}, which is
- * spent once, and it may live at most {@code jwt.max-lifetime-seconds}. It
- * then follows the same account path. Anything else presented as an {@code oidc:}
- * password, including a raw ID token and a {@code jwt:} credential while
- * the flag is off, is refused unread.
+ * spent once, it may live at most {@code jwt.max-lifetime-seconds}, and its
+ * {@code client_id} must be listed when {@code jwt.allowed-clients} is set.
+ * It then follows the same account path. Anything else presented as an
+ * {@code oidc:} password, including a raw ID token and a {@code jwt:}
+ * credential while the flag is off, is refused unread.
  *
  * <p>Contract: an {@code oidc:}-prefixed password NEVER returns null — a
  * failed SSO assertion must not degrade into a password guess. It succeeds
@@ -362,7 +364,7 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
                 if (!config.jwtEnabled()) {
                     return fail("SSO sign-in was rejected.");
                 }
-                // A JWT grant minted by the configured provider for this engine.
+                // A JWT access token the configured provider issued for this engine.
                 token = credential.substring(JWT_PREFIX.length());
                 if (token.isEmpty()) {
                     return fail("SSO sign-in was rejected.");
@@ -385,18 +387,18 @@ public final class OidcAuthorizationPlugin implements AuthorizationPlugin, Servi
                 // a guess to exercise. The jwt: prefix is the explicit presentation.
                 return fail("SSO sign-in was rejected.");
             }
-            JWTClaimsSet claims = direct ? validator.validateGrant(token) : validator.validate(token);
+            JWTClaimsSet claims = direct ? validator.validateAccessToken(token) : validator.validate(token);
             // The replay memory is in memory and starts empty with this
-            // instance, so a grant issued before then may have been spent on
+            // instance, so a token issued before then may have been spent on
             // an earlier run. The skew covers a provider clock running behind.
             // Tickets are exempt: the callback fetched their token with a
             // single-use code, and tickets do not survive a restart.
             if (direct && issuedBeforeStart(claims, config)) {
-                log.debug("OIDC login rejected: the jwt: grant was issued before this engine's replay memory began");
+                log.debug("OIDC login rejected: the jwt: token was issued before this engine's replay memory began");
                 return fail("SSO sign-in was rejected.");
             }
             // Recorded only after validation, so garbage cannot fill the cache.
-            // A grant by its jti; an ID token by its signed content.
+            // An access token by its jti; an ID token by its signed content.
             long now = System.currentTimeMillis();
             long keepUntil = OidcTokenValidator.acceptedUntilMillis(claims, config);
             boolean firstUse = direct

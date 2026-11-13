@@ -8,9 +8,11 @@ package org.openintegrationengine.plugins.oidc;
 
 import java.net.URL;
 
+import com.nimbusds.jose.JOSEObjectType;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.proc.BadJOSEException;
 import com.nimbusds.jose.proc.DefaultJOSEObjectTypeVerifier;
+import com.nimbusds.jose.proc.JOSEObjectTypeVerifier;
 import com.nimbusds.jose.proc.JWSKeySelector;
 import com.nimbusds.jose.proc.JWSVerificationKeySelector;
 import com.nimbusds.jose.proc.SecurityContext;
@@ -28,7 +30,8 @@ import com.nimbusds.jwt.proc.DefaultJWTProcessor;
  * provider's JWKS, an asymmetric-only algorithm allowlist (kills alg=none and
  * HS256 key confusion), issuer, and an exp/nbf/iat freshness window with
  * configured skew. {@link #validate(String)} adds the ID-token audience rules;
- * {@link #validateGrant(String)} adds the rules for a JWT grant.
+ * {@link #validateAccessToken(String)} adds the rules for a JWT access token
+ * presented to this engine as a resource server (RFC 9068).
  *
  * <p>The JWK source is held for the lifetime of this validator (one validator
  * per config load), so JWKS fetches are cached across logins with the
@@ -42,6 +45,24 @@ public final class OidcTokenValidator {
     private static final int JWKS_MAX_BYTES = 1024 * 1024;
     /** An unknown kid refetches at most this often; a rotation is not a per-second event. */
     private static final long JWKS_REFETCH_INTERVAL_MILLIS = 30_000;
+
+    /**
+     * What an ID token may say in its header {@code typ}: {@code JWT} or
+     * nothing. An RFC 9068 access token says {@code at+jwt}, and is refused on
+     * this path: it was issued to a resource, not to this client.
+     */
+    private static final JOSEObjectTypeVerifier<SecurityContext> ID_TOKEN_TYPES = DefaultJOSEObjectTypeVerifier.JWT;
+
+    /**
+     * What a token on the direct path may say: {@code at+jwt} or its media
+     * type spelling (RFC 9068 §2.1 and §4), {@code JWT}, or nothing. The
+     * audience rule in {@link #validateAccessToken(String)} is what keeps an
+     * ID token off this path, so the type is informative here rather than
+     * the gate.
+     */
+    private static final JOSEObjectTypeVerifier<SecurityContext> ACCESS_TOKEN_TYPES =
+            new DefaultJOSEObjectTypeVerifier<>(JOSEObjectType.JWT, new JOSEObjectType("at+jwt"),
+                    new JOSEObjectType("application/at+jwt"), null);
 
     private final OidcConfig config;
     private final DiscoveryClient discovery;
@@ -82,7 +103,7 @@ public final class OidcTokenValidator {
      * then audience and {@code azp} per OIDC Core 3.1.3.7.
      */
     public JWTClaimsSet validate(String token) throws Exception {
-        JWTClaimsSet claims = verify(token);
+        JWTClaimsSet claims = verify(token, ID_TOKEN_TYPES);
         if (!claims.getAudience().contains(config.clientId())) {
             throw new BadJWTException("issuer or audience rejected");
         }
@@ -96,15 +117,18 @@ public final class OidcTokenValidator {
     }
 
     /**
-     * A JWT authorization grant presented as {@code oidc:jwt:} (RFC 7523 §3):
-     * {@link #verify(String)}, then {@code aud} must name this engine
-     * ({@code jwt.audience}, never the client id, so an ordinary ID token is
-     * not a password), {@code jti} must be present so the grant can be spent
-     * once, and {@code exp - iat} must be at most
-     * {@code jwt.max-lifetime-seconds}: a grant is minted right before use.
+     * A JWT access token presented as {@code oidc:jwt:}, validated the way a
+     * resource server validates one (RFC 9068 §4): {@link #verify}, then
+     * {@code aud} must name this engine ({@code jwt.audience}, never the client
+     * id, so an ordinary ID token is not a password), {@code jti} must be
+     * present so the token can be spent once, {@code exp - iat} must be at
+     * most {@code jwt.max-lifetime-seconds} (a token for this engine is
+     * obtained right before use), and when {@code jwt.allowed-clients} is set,
+     * {@code client_id} must be one of them: only those clients may obtain a
+     * token that signs in here.
      */
-    public JWTClaimsSet validateGrant(String token) throws Exception {
-        JWTClaimsSet claims = verify(token);
+    public JWTClaimsSet validateAccessToken(String token) throws Exception {
+        JWTClaimsSet claims = verify(token, ACCESS_TOKEN_TYPES);
         if (!claims.getAudience().contains(config.jwtAudience())) {
             throw new BadJWTException("audience rejected");
         }
@@ -115,16 +139,22 @@ public final class OidcTokenValidator {
         if (lifetime > config.jwtMaxLifetimeSeconds() * 1000L) {
             throw new BadJWTException("token lifetime rejected");
         }
+        if (!config.jwtAllowedClients().isEmpty()) {
+            String clientId = claims.getStringClaim("client_id");
+            if (clientId == null || !config.jwtAllowedClients().contains(clientId)) {
+                throw new BadJWTException("client_id rejected");
+            }
+        }
         return claims;
     }
 
     /**
      * What every token must pass: an allowed asymmetric algorithm, a signature
-     * from the provider's JWKS, a header {@code typ} of JWT or none (so an
-     * RFC 9068 access token is refused), the discovered issuer, and an
-     * exp/iat/nbf window with skew. Audience is the caller's rule.
+     * from the provider's JWKS, a header {@code typ} the caller's path allows,
+     * the discovered issuer, and an exp/iat/nbf window with skew. Audience is
+     * the caller's rule.
      */
-    private JWTClaimsSet verify(String token) throws Exception {
+    private JWTClaimsSet verify(String token, JOSEObjectTypeVerifier<SecurityContext> allowedTypes) throws Exception {
         DiscoveryClient.Metadata metadata = discovery.get(config);
         SignedJWT parsed = SignedJWT.parse(token);
         String alg = parsed.getHeader().getAlgorithm().getName();
@@ -136,7 +166,7 @@ public final class OidcTokenValidator {
                 new JWSVerificationKeySelector<>(JWSAlgorithm.parse(alg), jwksFor(metadata.jwksUri()));
         DefaultJWTProcessor<SecurityContext> processor = new DefaultJWTProcessor<>();
         processor.setJWSKeySelector(keySelector);
-        processor.setJWSTypeVerifier(DefaultJOSEObjectTypeVerifier.JWT);
+        processor.setJWSTypeVerifier(allowedTypes);
         JWTClaimsSet claims = processor.process(parsed, null);
 
         if (!metadata.issuer().equals(claims.getIssuer())) {

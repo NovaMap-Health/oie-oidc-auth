@@ -16,7 +16,7 @@ import java.util.regex.Pattern;
 
 /**
  * Refuses a token that has already been spent: an ID token by its signed
- * content, a JWT grant by its {@code jti}.
+ * content, a JWT access token by its {@code jti}.
  *
  * <p>A valid ID token stays cryptographically valid until it expires, so
  * anything that captures one — a proxy log, a shared browser, an
@@ -46,7 +46,7 @@ final class ReplayCache {
     private static final Pattern CANONICAL_SIGNED_CONTENT =
             Pattern.compile("[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+");
 
-    /** hash of a token's signed content, or of a grant's issuer and jti → when its record may be forgotten. */
+    /** hash of a token's signed content, or of an access token's issuer and jti → when its record may be forgotten. */
     private final ConcurrentMap<String, Long> seen = new ConcurrentHashMap<>();
 
     /**
@@ -68,15 +68,25 @@ final class ReplayCache {
     }
 
     /**
-     * Records a JWT grant as spent by its issuer and {@code jti} (RFC 7523
-     * §3, item 7). The jti is the grant's identity, so a re-signed or
-     * re-spelled copy is the same grant.
+     * Records a JWT access token as spent by its issuer and {@code jti}
+     * (RFC 9068 §4: the jti is what a resource server replays against). The
+     * jti is the token's identity, so a re-signed or re-spelled copy is the
+     * same token.
      */
     boolean claimId(String issuer, String jti, long keepUntil, long now) {
         return record("jti:" + issuer + "#" + jti, keepUntil, now);
     }
 
     private boolean record(String key, long keepUntil, long now) {
+        // A record that is already past its keep-until is no record: the next
+        // call's sweep drops it, and a second presentation of the same token
+        // becomes a "first use". Two logins validating the same token at the
+        // very end of its window, then racing past it, could both succeed.
+        // The validator's own clock check is what normally stops this; refusing
+        // here means the cache keeps its promise on its own.
+        if (keepUntil < now) {
+            throw new SecurityException("token is past its acceptance window");
+        }
         // Sweep first: expired records are not evidence, and clearing them is
         // what keeps the capacity check below measuring live pressure rather
         // than accumulated history.

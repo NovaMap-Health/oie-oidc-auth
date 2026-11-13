@@ -22,7 +22,8 @@ import java.util.Set;
  */
 public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, String clientSecret,
         String webAdministratorUrl, java.util.List<String> scopes, String providerLabel, boolean autoRedirect,
-        boolean jwtEnabled, String jwtAudience, long jwtMaxLifetimeSeconds, String usernameClaim,
+        boolean jwtEnabled, String jwtAudience, long jwtMaxLifetimeSeconds, Set<String> jwtAllowedClients,
+        String usernameClaim,
         Set<String> allowedAlgorithms, long clockSkewSeconds, long maxTokenAgeSeconds, long jwksCacheTtlSeconds,
         boolean jitEnabled, String emailClaim, String nameClaim, String organizationClaim, String usernamePrefix,
         Map<String, String> linkedAccounts, String rolesClaim, Map<String, String> rolesMap, String defaultRole,
@@ -81,10 +82,11 @@ public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, 
         long jwtMaxLifetime = number(p, "jwt.max-lifetime-seconds");
         boolean jwtEnabled = bool(p, "jwt.enabled");
         String jwtAudience = value(p, "jwt.audience").trim();
-        // A jwt: token is an RFC 7523 grant addressed to this engine alone. Its
-        // audience must be its own: with the client id, every ID token the
-        // provider issues for an ordinary sign-in, on any engine sharing the
-        // client, would also be accepted as a password.
+        Set<String> jwtAllowedClients = csv(value(p, "jwt.allowed-clients"));
+        // A jwt: token is an RFC 9068 access token addressed to this engine as
+        // a resource server. Its audience must be its own: with the client id,
+        // every ID token the provider issues for an ordinary sign-in, on any
+        // engine sharing the client, would also be accepted as a password.
         if (enabled && jwtEnabled) {
             if (jwtAudience.isEmpty()) {
                 throw new IllegalArgumentException("jwt.audience is required when jwt.enabled is true. Set it to an "
@@ -133,6 +135,9 @@ public record OidcConfig(boolean enabled, String discoveryUrl, String clientId, 
                 jwtEnabled,
                 jwtAudience,
                 jwtMaxLifetime,
+                // Empty means any client the provider issued the token to. Set,
+                // only a token whose client_id is listed signs in.
+                jwtAllowedClients,
                 value(p, "username-claim"),
                 csv(value(p, "allowed-algorithms")),
                 clockSkew,

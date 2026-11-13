@@ -55,11 +55,12 @@ class ReplayCacheTest {
     }
 
     /**
-     * A JWT grant is spent by its issuer and jti, whatever token carries them,
-     * and that record never collides with a token's signed-content record.
+     * A JWT access token is spent by its issuer and jti, whatever token
+     * carries them, and that record never collides with a token's
+     * signed-content record.
      */
     @Test
-    void aGrantIsSpentByItsIssuerAndJti() {
+    void anAccessTokenIsSpentByItsIssuerAndJti() {
         long now = 1_000_000;
         assertTrue(cache.claimId("https://issuer", "grant-1", now + TTL, now));
         assertFalse(cache.claimId("https://issuer", "grant-1", now + TTL, now), "the same jti is a replay");
@@ -126,6 +127,29 @@ class ReplayCacheTest {
         // Past its expiry the record may go: the token itself no longer validates,
         // so the cache is not what is stopping it.
         assertTrue(cache.claim(jws("token"), now + TTL + 1 + TTL, now + TTL + 1));
+    }
+
+    /**
+     * A record whose keep-until has already passed must not be written and
+     * must not count as a first use. Written, it would be swept by the next
+     * call, and the token's second presentation would be accepted as its
+     * first: two logins that validated the same token just before its window
+     * closed, then raced past it, would both succeed. At the boundary itself
+     * the record is still live, so the token is spent as usual.
+     */
+    @Test
+    void refusesARecordThatIsAlreadyPastItsKeepUntil() {
+        long now = 1_000_000;
+        assertThrows(SecurityException.class, () -> cache.claim(jws("late"), now - 1, now),
+                "a token past its window is refused, not recorded");
+        assertThrows(SecurityException.class, () -> cache.claim(jws("late"), now - 1, now),
+                "and refused again, never accepted as a first use");
+        assertThrows(SecurityException.class, () -> cache.claimId("https://issuer", "late-1", now - 1, now));
+
+        assertTrue(cache.claim(jws("edge"), now, now), "at the boundary the record is still live");
+        assertFalse(cache.claim(jws("edge"), now, now), "and the token is spent");
+        assertTrue(cache.claimId("https://issuer", "edge-1", now, now));
+        assertFalse(cache.claimId("https://issuer", "edge-1", now, now));
     }
 
     /**

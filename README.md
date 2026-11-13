@@ -9,7 +9,7 @@ This extension adds OpenID Connect single sign-on to the OIE web administrator. 
 ## Requirements
 
 - OIE 4.6.0.
-- OIE web administrator 0.9.0 or newer.
+- OIE web administrator 1.3.1 or newer. Older releases submit a placeholder username with the SSO ticket, which this release refuses (see *Sign-in flow*).
 - A confidential client at an OpenID Connect provider. You need its client ID and client secret.
 - The redirect URI `<web-administrator-url>/oidc/callback`, registered at the provider.
 - Optional: the role-based-access-control (RBAC) extension. Role assignment needs it. Read *Just-in-time users* before you enable user creation without it.
@@ -104,7 +104,7 @@ The engine exposes three operations that need no session: `GET /api/extensions/o
 Rules that apply to this flow:
 
 - An `oidc:` credential succeeds only when the submitted username is exactly the engine username its token maps to. The comparison is case-sensitive, and a placeholder such as `oidc` is refused. A mismatch is refused before any account is created or any role changes, and the ticket and the token are spent. The engine's HTTP Basic login runs a request as the username it was sent, not the one the plugin resolves, so without this check `admin:oidc:ticket:<id>` with your own ticket would act as `admin`. The same rule applies to `oidc:jwt:<jwt>`.
-- A browser sign-in uses a ticket. When `jwt.enabled` is true, a JWT authorization grant (RFC 7523) that the configured provider minted for this engine can also be presented as `password=oidc:jwt:<jwt>`, with the username that grant maps to. This is for clients that cannot run a browser redirect, such as a service to service login on behalf of an user. See *JWT grants*. The key defaults to false, and while it is false that presentation is refused unread. An ID token sent without the `jwt:` prefix is refused unread.
+- A browser sign-in uses a ticket. When `jwt.enabled` is true, a JWT access token (RFC 9068) that the configured provider issued for this engine can also be presented as `password=oidc:jwt:<jwt>`, with the username that token maps to. The engine then acts as the token's resource server. This is for clients that cannot run a browser redirect, such as a desktop launcher or a service acting on behalf of a user. See *JWT access tokens*. The key defaults to false, and while it is false that presentation is refused unread. An ID token sent without the `jwt:` prefix is refused unread.
 - The return route must be a path on the web administrator of at most 2048 characters. Any other value returns the user to `/`.
 - The code exchange uses `client_secret_basic`. It uses `client_secret_post` only when the provider's discovery document lists `client_secret_post` and not `client_secret_basic`.
 - The engine limits `/callback` to sixty requests per minute per client and six hundred per minute in total. The client is the first `X-Forwarded-For` address when the header is present, and the peer address otherwise. `/public` and `/start` have no limit.
@@ -117,25 +117,27 @@ Rules that apply to this flow:
 - The engine keeps the discovery document for `jwks-cache-ttl-seconds`.
 - The engine keeps the key set for `jwks-cache-ttl-seconds`. It fetches the key set with a ten-second timeout and a one-megabyte limit. An unknown key ID causes one new fetch at most every thirty seconds.
 - The token algorithm must be in `allowed-algorithms`. The engine never accepts `HS*` or `none`.
-- `iss` must equal the discovery document's issuer. An ID token's `aud` must contain the client ID; a token with several audiences must carry `azp`, and an `azp` that is present must equal the client ID. A JWT grant has its own audience rule (*JWT grants*).
-- A header `typ` of `at+jwt` is refused for every token, so an RFC 9068 access token is never accepted.
+- `iss` must equal the discovery document's issuer. An ID token's `aud` must contain the client ID; a token with several audiences must carry `azp`, and an `azp` that is present must equal the client ID. A JWT access token has its own audience rule (*JWT access tokens*).
+- An ID token's header `typ` must be `JWT` or absent. A header `typ` of `at+jwt` or `application/at+jwt` marks an RFC 9068 access token: it is refused on the ticket path and accepted on the `oidc:jwt:` path only.
 - `exp`, `nbf`, and `iat` are checked against the engine clock with `clock-skew-seconds` of tolerance. `iat` must be at most `max-token-age-seconds` old.
-- The engine remembers each accepted token for as long as it would still accept it, an ID token by its signed content and a JWT grant by its issuer and `jti`, until the earlier of `exp` and `iat` plus `max-token-age-seconds`, plus `clock-skew-seconds`, and refuses it a second time. This memory lives in the engine process. It starts empty when the engine starts, and engine nodes do not share it.
-- Because that memory starts empty, an `oidc:jwt:` grant is refused if its `iat` is earlier than the engine's start time plus `clock-skew-seconds`. After a restart, a client must fetch a new token, and a token issued in the first `clock-skew-seconds` after startup is refused too. Browser sign-ins through a ticket are not affected.
+- The engine remembers each accepted token for as long as it would still accept it, an ID token by its signed content and a JWT access token by its issuer and `jti`, until the earlier of `exp` and `iat` plus `max-token-age-seconds`, plus `clock-skew-seconds`, and refuses it a second time. A token that reaches this memory after that instant is refused outright. This memory lives in the engine process. It starts empty when the engine starts, and engine nodes do not share it.
+- Because that memory starts empty, an `oidc:jwt:` token is refused if its `iat` is earlier than the engine's start time plus `clock-skew-seconds`. After a restart, a client must fetch a new token, and a token issued in the first `clock-skew-seconds` after startup is refused too. Browser sign-ins through a ticket are not affected.
 
-### JWT grants
+### JWT access tokens
 
-`password=oidc:jwt:<jwt>` carries a JWT authorization grant (RFC 7523 §3), not an ID token. An issuer mints it for one engine right before use. On top of the signature, algorithm, issuer, header `typ`, and lifetime checks above:
+`password=oidc:jwt:<jwt>` carries a JWT access token (RFC 9068), not an ID token. The client obtains it from the provider's token endpoint for this engine as the resource (RFC 8707 `resource`, or the provider's equivalent audience setting) right before use, and the engine validates it as the resource server (RFC 9068 §4). The engine does not implement a grant of its own: how the client obtains the token is between the client and the provider. On top of the signature, algorithm, issuer, header `typ`, and lifetime checks above:
 
-- `aud` must contain `jwt.audience`, an identifier for this engine alone such as its URL. It may not be the client ID, so an ID token from an ordinary sign-in is never accepted as a password, and a grant minted for one engine is refused by another.
-- `jti` is required. A grant is spent once, by its issuer and `jti`, so a re-signed or re-spelled copy is refused too.
+- `aud` must contain `jwt.audience`, an identifier for this engine alone such as its URL. It may not be the client ID, so an ID token from an ordinary sign-in is never accepted as a password, and a token issued for one engine is refused by another.
+- `jti` is required. A token is spent once, by its issuer and `jti`, so a re-signed or re-spelled copy is refused too.
 - `exp` minus `iat` may be at most `jwt.max-lifetime-seconds`.
-- `sub`, the username claim, and the profile and role claims are read as for an ID token, so the same person gets the same engine account by either route only when the issuer uses the same `sub` in both. See *Accounts*.
+- When `jwt.allowed-clients` is set, `client_id` must be one of the listed values. A token without `client_id` is then refused. Leave it empty to accept a token from any client the provider issued one to.
+- `sub`, the username claim, and the profile and role claims are read as for an ID token, so the same person gets the same engine account by either route only when the issuer uses the same `sub` in both. The provider must put the username, profile, and role claims in the access token. See *Accounts*.
+- The header `typ` should be `at+jwt`. `JWT` and no `typ` are also accepted on this path for providers that do not type their access tokens.
 
-A minimal grant:
+A minimal token:
 
 ```json
-{ "iss": "<issuer>", "aud": "<jwt.audience>", "sub": "<the user's subject>",
+{ "iss": "<issuer>", "aud": "<jwt.audience>", "sub": "<the user's subject>", "client_id": "<the client>",
   "jti": "<random>", "iat": 1700000000, "exp": 1700000060,
   "preferred_username": "jdoe", "email": "jdoe@example.com", "groups": ["engine-admins"] }
 ```
@@ -207,9 +209,10 @@ Every key lives in the engine database and is edited under **Settings → OIDC A
 | `web-administrator-url` | *(empty)* | The address browsers open the web administrator at, for example `https://oie-admin.example` or `https://engine.example:8443/oie-webadmin`. A base URL with no query, fragment, or credentials. HTTPS, or HTTP for `localhost`. The redirect URI is `<this>/oidc/callback`. Required when enabled. |
 | `provider-label` | `SSO` | The sign-in button reads "Sign in with `<label>`". |
 | `auto-redirect` | `false` | Send visitors to the provider at once instead of showing the button. Local sign-in stays available. |
-| `jwt.enabled` | `false` | Accept a JWT grant as `password=oidc:jwt:<jwt>`. See *JWT grants*. The browser ticket flow does not use this key. |
-| `jwt.audience` | *(empty)* | The `aud` a JWT grant must carry: an identifier for this engine alone, such as its URL. Required when `jwt.enabled` is true, and must differ from `client-id`. |
-| `jwt.max-lifetime-seconds` | `120` | The longest `exp` minus `iat` a JWT grant may have. |
+| `jwt.enabled` | `false` | Accept a JWT access token as `password=oidc:jwt:<jwt>`. See *JWT access tokens*. The browser ticket flow does not use this key. |
+| `jwt.audience` | *(empty)* | The `aud` a JWT access token must carry: an identifier for this engine alone, such as its URL. Required when `jwt.enabled` is true, and must differ from `client-id`. |
+| `jwt.max-lifetime-seconds` | `120` | The longest `exp` minus `iat` a JWT access token may have. |
+| `jwt.allowed-clients` | *(empty)* | Client IDs whose access tokens are accepted, separated by commas. Checked against `client_id`. Empty accepts any client. |
 | `scopes` | `openid profile email` | Scopes requested from the provider, separated by spaces or commas. `openid` is always included. |
 | `username-claim` | `preferred_username` | The claim that becomes the engine username. |
 | `username-prefix` | *(empty)* | Text put in front of the normalized username. Must match `a-z 0-9 . _ @ + : -`. |
@@ -234,5 +237,5 @@ Every key lives in the engine database and is edited under **Settings → OIDC A
 - Confidential clients only. The engine holds the client secret. Public clients with PKCE only are not supported.
 - One identity provider per engine. The engine loads one authorization plugin.
 - One role per user. `roles.map` gives the first match, not a union.
-- Replay memory is per engine process. Several engines behind one load balancer do not share it, so with `jwt.enabled` a grant spent on one engine can be spent again on another engine that shares its `jwt.audience`. Give each engine its own audience. See *Token validation*.
+- Replay memory is per engine process. Several engines behind one load balancer do not share it, so with `jwt.enabled` a token spent on one engine can be spent again on another engine that shares its `jwt.audience`. Give each engine its own audience. See *Token validation*.
 - Removal of a user at the provider blocks the next sign-in. It does not disable or delete the engine account. Delete the engine user as well.

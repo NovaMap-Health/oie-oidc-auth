@@ -58,6 +58,20 @@ class OidcConfigTest {
         assertTrue(config.jwtEnabled());
         assertEquals("https://engine.example", config.jwtAudience());
         assertEquals(120, config.jwtMaxLifetimeSeconds());
+        assertTrue(config.jwtAllowedClients().isEmpty(), "unset means any client the provider issued to");
+    }
+
+    /** A comma-separated list, trimmed, blanks dropped; the validator checks client_id against it. */
+    @Test
+    void directJwtAllowedClientsIsAnOptionalList() {
+        Properties on = enabled();
+        on.setProperty("jwt.enabled", "true");
+        on.setProperty("jwt.audience", "https://engine.example");
+        on.setProperty("jwt.allowed-clients", " launcher, portal-core ,, ");
+        OidcConfig config = OidcConfig.from(on);
+        assertEquals(2, config.jwtAllowedClients().size());
+        assertTrue(config.jwtAllowedClients().contains("launcher"));
+        assertTrue(config.jwtAllowedClients().contains("portal-core"));
     }
 
     /**

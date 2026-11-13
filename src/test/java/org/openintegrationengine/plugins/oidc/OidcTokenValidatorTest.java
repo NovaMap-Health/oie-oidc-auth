@@ -183,14 +183,22 @@ class OidcTokenValidatorTest {
         assertDoesNotThrow(() -> validator().validate(sign(claims().claim("azp", "client").build(), signingKey)));
     }
 
-    /* ---- a jwt: credential is a JWT grant for this engine (RFC 7523) ---- */
+    /* ---- a jwt: credential is a JWT access token for this engine (RFC 9068) ---- */
 
     private static final String ENGINE = "https://engine.example";
 
     private static OidcTokenValidator grantValidator() {
+        return grantValidator(null);
+    }
+
+    /** With {@code jwt.allowed-clients} set; null for unset. */
+    private static OidcTokenValidator grantValidator(String allowedClients) {
         Properties p = policy();
         p.setProperty("jwt.enabled", "true");
         p.setProperty("jwt.audience", ENGINE);
+        if (allowedClients != null) {
+            p.setProperty("jwt.allowed-clients", allowedClients);
+        }
         return new OidcTokenValidator(OidcConfig.from(p), new DiscoveryClient());
     }
 
@@ -203,8 +211,48 @@ class OidcTokenValidatorTest {
 
     @Test
     void acceptsAGrantAddressedToThisEngine() throws Exception {
-        assertEquals("grant-1", grantValidator().validateGrant(sign(grant().build(), signingKey)).getJWTID());
-        assertDoesNotThrow(() -> grantValidator().validateGrant(sign(grant().build(), signingKey, "JWT")));
+        assertEquals("grant-1", grantValidator().validateAccessToken(sign(grant().build(), signingKey)).getJWTID());
+        assertDoesNotThrow(() -> grantValidator().validateAccessToken(sign(grant().build(), signingKey, "JWT")));
+    }
+
+    /**
+     * RFC 9068 §2.1: a JWT access token says {@code at+jwt} in its header, or
+     * the media type spelling, in any case. This is the token a provider mints
+     * for a resource, so the direct path accepts it. An ID token never carries
+     * it, and the ID-token path still refuses it (below).
+     */
+    @Test
+    void anAccessTokenTypedAtJwtIsAcceptedOnTheDirectPath() throws Exception {
+        for (String typ : new String[] {"at+jwt", "AT+JWT", "application/at+jwt", "application/AT+JWT"}) {
+            assertEquals("grant-1", grantValidator().validateAccessToken(sign(grant().build(), signingKey, typ)).getJWTID(), typ);
+        }
+        assertThrows(Exception.class, () -> grantValidator().validateAccessToken(sign(grant().build(), signingKey, "JWE")),
+                "any other type is still refused");
+    }
+
+    /**
+     * {@code jwt.allowed-clients} narrows who may obtain a token that signs in
+     * here. Unset, the provider's audience decision stands alone; set, the
+     * token's {@code client_id} (RFC 9068 §2.2) must be listed, and a token
+     * without one is refused.
+     */
+    @Test
+    void anAccessTokenMustComeFromAnAllowedClientWhenTheListIsSet() throws Exception {
+        String fromLauncher = sign(grant().claim("client_id", "launcher").build(), signingKey, "at+jwt");
+        String fromOther = sign(grant().claim("client_id", "other-app").build(), signingKey, "at+jwt");
+        String anonymous = sign(grant().build(), signingKey, "at+jwt");
+
+        OidcTokenValidator unrestricted = grantValidator();
+        assertDoesNotThrow(() -> unrestricted.validateAccessToken(fromLauncher));
+        assertDoesNotThrow(() -> unrestricted.validateAccessToken(fromOther));
+        assertDoesNotThrow(() -> unrestricted.validateAccessToken(anonymous));
+
+        OidcTokenValidator restricted = grantValidator("launcher, portal-core");
+        assertDoesNotThrow(() -> restricted.validateAccessToken(fromLauncher));
+        assertDoesNotThrow(() -> restricted.validateAccessToken(
+                sign(grant().claim("client_id", "portal-core").build(), signingKey, "at+jwt")));
+        assertThrows(Exception.class, () -> restricted.validateAccessToken(fromOther));
+        assertThrows(Exception.class, () -> restricted.validateAccessToken(anonymous), "no client_id is not an allowed client");
     }
 
     /**
@@ -216,20 +264,20 @@ class OidcTokenValidatorTest {
     void anIdTokenIsNotAGrantAndAGrantIsNotAnIdToken() throws Exception {
         String idToken = sign(claims().jwtID("id-1").build(), signingKey);
         assertDoesNotThrow(() -> grantValidator().validate(idToken));
-        assertThrows(Exception.class, () -> grantValidator().validateGrant(idToken));
+        assertThrows(Exception.class, () -> grantValidator().validateAccessToken(idToken));
         assertThrows(Exception.class, () -> grantValidator().validate(sign(grant().build(), signingKey)));
     }
 
     @Test
     void aGrantForAnotherEngineIsRejected() {
         assertThrows(Exception.class, () -> grantValidator()
-                .validateGrant(sign(grant().audience("https://other-engine.example").build(), signingKey)));
+                .validateAccessToken(sign(grant().audience("https://other-engine.example").build(), signingKey)));
     }
 
     @Test
     void aGrantWithoutAJtiIsRejected() {
-        assertThrows(Exception.class, () -> grantValidator().validateGrant(sign(grant().jwtID(null).build(), signingKey)));
-        assertThrows(Exception.class, () -> grantValidator().validateGrant(sign(grant().jwtID(" ").build(), signingKey)));
+        assertThrows(Exception.class, () -> grantValidator().validateAccessToken(sign(grant().jwtID(null).build(), signingKey)));
+        assertThrows(Exception.class, () -> grantValidator().validateAccessToken(sign(grant().jwtID(" ").build(), signingKey)));
     }
 
     /** exp − iat is capped by jwt.max-lifetime-seconds (120 by default). */
@@ -238,21 +286,24 @@ class OidcTokenValidatorTest {
         Date now = new Date();
         String atLimit = sign(grant().issueTime(now).expirationTime(new Date(now.getTime() + 120_000)).build(), signingKey);
         String over = sign(grant().issueTime(now).expirationTime(new Date(now.getTime() + 121_000)).build(), signingKey);
-        assertDoesNotThrow(() -> grantValidator().validateGrant(atLimit));
-        assertThrows(Exception.class, () -> grantValidator().validateGrant(over));
+        assertDoesNotThrow(() -> grantValidator().validateAccessToken(atLimit));
+        assertThrows(Exception.class, () -> grantValidator().validateAccessToken(over));
     }
 
     @Test
     void aGrantStillNeedsTheProvidersSignatureAndIssuer() {
-        assertThrows(Exception.class, () -> grantValidator().validateGrant(sign(grant().build(), rogueKey)));
+        assertThrows(Exception.class, () -> grantValidator().validateAccessToken(sign(grant().build(), rogueKey)));
         assertThrows(Exception.class, () -> grantValidator()
-                .validateGrant(sign(grant().issuer("https://evil.example").build(), signingKey)));
-        assertThrows(Exception.class, () -> grantValidator().validateGrant(sign(grant().build(), signingKey, "at+jwt")));
+                .validateAccessToken(sign(grant().issuer("https://evil.example").build(), signingKey)));
     }
 
-    /** RFC 9068 access tokens say so in the header, in either spelling, and no path accepts them. */
+    /**
+     * RFC 9068 access tokens say so in the header, in either spelling, and the
+     * ID-token path never accepts one: it was issued to a resource, not to
+     * this client, and a ticket must stand for a sign-in this engine ran.
+     */
     @Test
-    void aTokenTypedAsAnAccessTokenIsRejected() {
+    void aTokenTypedAsAnAccessTokenIsRejectedAsAnIdToken() {
         assertThrows(Exception.class, () -> validator().validate(sign(claims().build(), signingKey, "at+jwt")));
         assertThrows(Exception.class,
                 () -> validator().validate(sign(claims().build(), signingKey, "application/AT+JWT")));

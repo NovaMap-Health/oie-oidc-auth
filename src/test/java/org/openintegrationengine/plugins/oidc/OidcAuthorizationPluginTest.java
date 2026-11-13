@@ -343,7 +343,7 @@ class OidcAuthorizationPluginTest {
     /** Both validators accept: an ID token as validClaims(), a grant as grantFor(token). */
     private static void acceptAll(OidcTokenValidator validator) throws Exception {
         when(validator.validate(any())).thenReturn(validClaims());
-        when(validator.validateGrant(any())).thenAnswer(call -> grantFor(call.getArgument(0), new Date()));
+        when(validator.validateAccessToken(any())).thenAnswer(call -> grantFor(call.getArgument(0), new Date()));
     }
 
     private static String ticketFor(OidcAuthorizationPlugin plugin, String token) {
@@ -385,7 +385,7 @@ class OidcAuthorizationPluginTest {
         LoginStatus jwt = plugin.authorizeUser("jdoe", "oidc:jwt:header.aaa.sig");
         assertEquals(Status.FAIL, jwt.getStatus());
         assertEquals("SSO sign-in was rejected.", jwt.getMessage());
-        verify(validator, never()).validateGrant(any());
+        verify(validator, never()).validateAccessToken(any());
 
         LoginStatus ticket = plugin.authorizeUser("jdoe", ticketFor(plugin, "header.bbb.sig"));
         assertEquals("SSO sign-in was rejected.", ticket.getMessage(), "past the token checks; refused by provisioning");
@@ -401,17 +401,17 @@ class OidcAuthorizationPluginTest {
     @Test
     void aGrantPresentedAsJwtStartsASessionAndCannotBeReplayed() throws Exception {
         OidcTokenValidator validator = mock(OidcTokenValidator.class);
-        when(validator.validateGrant("header.aaa.sig")).thenReturn(grantFor("header.aaa.sig", new Date()));
+        when(validator.validateAccessToken("header.aaa.sig")).thenReturn(grantFor("header.aaa.sig", new Date()));
         OidcAuthorizationPlugin plugin = jwtPlugin(validator, directory(true));
 
         LoginStatus status = plugin.authorizeUser("jdoe", "oidc:jwt:header.aaa.sig");
         assertEquals(Status.SUCCESS, status.getStatus());
         assertEquals("jdoe", status.getUpdatedUsername());
-        verify(validator, times(1)).validateGrant("header.aaa.sig");
+        verify(validator, times(1)).validateAccessToken("header.aaa.sig");
         verify(validator, never()).validate(any());
 
         assertEquals("SSO assertion was already used.", plugin.authorizeUser("jdoe", "oidc:jwt:header.aaa.sig").getMessage());
-        verify(validator, times(2)).validateGrant("header.aaa.sig");
+        verify(validator, times(2)).validateAccessToken("header.aaa.sig");
     }
 
     /**
@@ -431,7 +431,7 @@ class OidcAuthorizationPluginTest {
             assertEquals("SSO assertion was already used.",
                     plugin.authorizeUser("jdoe", "oidc:jwt:" + spelling).getMessage(), spelling);
         }
-        when(validator.validateGrant("other.payload.sig")).thenReturn(grantFor("header.aaa.sig", new Date()));
+        when(validator.validateAccessToken("other.payload.sig")).thenReturn(grantFor("header.aaa.sig", new Date()));
         assertEquals("SSO assertion was already used.",
                 plugin.authorizeUser("jdoe", "oidc:jwt:other.payload.sig").getMessage(),
                 "a different token carrying a spent jti is the spent grant");
@@ -509,7 +509,7 @@ class OidcAuthorizationPluginTest {
     void aJwtIsCheckedAsAGrantAndATicketAsAnIdToken() throws Exception {
         OidcTokenValidator validator = mock(OidcTokenValidator.class);
         when(validator.validate(any())).thenReturn(validClaims());
-        when(validator.validateGrant(any())).thenThrow(new SecurityException("audience rejected"));
+        when(validator.validateAccessToken(any())).thenThrow(new SecurityException("audience rejected"));
         UserController users = directory(true);
         OidcAuthorizationPlugin plugin = jwtPlugin(validator, users);
 
@@ -521,7 +521,7 @@ class OidcAuthorizationPluginTest {
 
         LoginStatus ticket = plugin.authorizeUser("jdoe", ticketFor(plugin, "header.bbb.sig"));
         assertEquals(Status.SUCCESS, ticket.getStatus());
-        verify(validator, times(1)).validateGrant(any());
+        verify(validator, times(1)).validateAccessToken(any());
         verify(validator, times(1)).validate("header.bbb.sig");
     }
 
@@ -621,11 +621,15 @@ class OidcAuthorizationPluginTest {
      */
     @Test
     void aJwtIssuedBeforeThisInstanceCouldRememberItIsRefused() throws Exception {
-        long started = 1_700_000_000_000L;
+        // Anchored to the real clock: the validator is mocked, but the replay
+        // cache is not, and it refuses a token whose acceptance window has
+        // already closed. A fixed instant in the past would make the accepted
+        // token below look spent-and-forgotten rather than fresh.
+        long started = System.currentTimeMillis() - 60_000;
         OidcTokenValidator validator = mock(OidcTokenValidator.class);
         for (String token : new String[] { "header.before.sig", "header.within.sig", "header.after.sig" }) {
             long offset = token.contains("before") ? -10_000 : token.contains("within") ? 59_000 : 60_000;
-            when(validator.validateGrant(token)).thenReturn(grantFor(token, new Date(started + offset)));
+            when(validator.validateAccessToken(token)).thenReturn(grantFor(token, new Date(started + offset)));
         }
         Properties p = jwtPolicy();
         p.setProperty("clock-skew-seconds", "60");

@@ -85,6 +85,7 @@ public final class PolicySchema {
             new Key("jwt.enabled", "false", Kind.BOOLEAN, "Accept direct JWT sign-in"),
             new Key("jwt.audience", "", Kind.TEXT, "Direct JWT audience (this engine)"),
             new Key("jwt.max-lifetime-seconds", "120", Kind.NUMBER, "Direct JWT maximum lifetime (seconds)"),
+            new Key("jwt.allowed-clients", "", Kind.TEXT, "Direct JWT allowed client IDs"),
             new Key("scopes", "openid profile email", Kind.TEXT, "Scopes"),
             new Key("username-claim", "preferred_username", Kind.TEXT, "Username claim"),
             new Key("allowed-algorithms", "RS256,RS384,RS512,ES256,ES384,ES512", Kind.TEXT, "Allowed algorithms"),
